@@ -119,6 +119,8 @@ class OpenCVCamera(Camera):
         self.rotation: int | None = get_cv2_rotation(config.rotation)
         self.backend: int = get_cv2_backend()
 
+        self.actual_fps: float = 0.0
+
         if self.height and self.width:
             self.capture_width, self.capture_height = self.width, self.height
             if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
@@ -436,6 +438,7 @@ class OpenCVCamera(Camera):
         1. Reads a color frame
         2. Stores result in latest_frame and updates timestamp (thread-safe)
         3. Sets new_frame_event to notify listeners
+        4. Updates actual_fps measurement
 
         Stops on DeviceNotConnectedError, logs other errors and continues.
         """
@@ -445,9 +448,14 @@ class OpenCVCamera(Camera):
         failure_count = 0
         while not self.stop_event.is_set():
             try:
+                start_time = time.perf_counter()
                 raw_frame = self._read_from_hardware()
                 processed_frame = self._postprocess_image(raw_frame)
                 capture_time = time.perf_counter()
+                # Measure actual FPS (time between consecutive frame captures)
+                dt = capture_time - start_time
+                if dt > 0:
+                    self.actual_fps = 1.0 / dt
 
                 with self.frame_lock:
                     self.latest_frame = processed_frame
