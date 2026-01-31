@@ -243,6 +243,86 @@ def test_act_backbone_lr():
     assert len(optimizer.param_groups[1]["params"]) == 20
 
 
+def test_act_separate_encoder_per_camera():
+    """
+    Test that ACT policy can use separate ResNet backbones for each camera.
+    """
+    from lerobot.policies.act.modeling_act import ACT, ACTPolicy
+
+    # Create features for 3 cameras
+    input_features = {
+        OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(6,)),
+        f"{OBS_IMAGES}.camera1": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 96, 96)),
+        f"{OBS_IMAGES}.camera2": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 96, 96)),
+        f"{OBS_IMAGES}.camera3": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 96, 96)),
+    }
+    output_features = {
+        ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(6,)),
+    }
+
+    # Test with shared encoder (default)
+    config_shared = ACTConfig(
+        input_features=input_features,
+        output_features=output_features,
+        use_separate_encoder_per_camera=False,
+    )
+    model_shared = ACT(config_shared)
+    assert hasattr(model_shared, "backbone")
+    assert not hasattr(model_shared, "backbones")
+    assert hasattr(model_shared, "encoder_img_feat_input_proj")
+    assert not hasattr(model_shared, "encoder_img_feat_input_projs")
+
+    # Test with separate encoders
+    config_separate = ACTConfig(
+        input_features=input_features,
+        output_features=output_features,
+        use_separate_encoder_per_camera=True,
+    )
+    model_separate = ACT(config_separate)
+    assert hasattr(model_separate, "backbones")
+    assert not hasattr(model_separate, "backbone")
+    assert len(model_separate.backbones) == 3
+    assert hasattr(model_separate, "encoder_img_feat_input_projs")
+    assert not hasattr(model_separate, "encoder_img_feat_input_proj")
+    assert len(model_separate.encoder_img_feat_input_projs) == 3
+
+    # Verify backbone params are ~3x with separate encoders
+    backbone_params_shared = sum(p.numel() for p in model_shared.backbone.parameters())
+    backbone_params_separate = sum(p.numel() for bb in model_separate.backbones for p in bb.parameters())
+    assert abs(backbone_params_separate / backbone_params_shared - 3.0) < 0.01
+
+    # Test forward pass with separate encoders
+    batch_size = 2
+    chunk_size = config_separate.chunk_size
+    batch = {
+        OBS_STATE: torch.randn(batch_size, 6),
+        OBS_IMAGES: [
+            torch.randn(batch_size, 3, 96, 96),
+            torch.randn(batch_size, 3, 96, 96),
+            torch.randn(batch_size, 3, 96, 96),
+        ],
+        ACTION: torch.randn(batch_size, chunk_size, 6),
+        "action_is_pad": torch.zeros(batch_size, chunk_size, dtype=torch.bool),
+    }
+    model_separate.train()
+    actions, (mu, log_sigma) = model_separate(batch)
+    assert actions.shape == (batch_size, chunk_size, 6)
+
+    # Test gradient flow
+    loss = actions.mean()
+    loss.backward()
+    for i, backbone in enumerate(model_separate.backbones):
+        has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in backbone.parameters())
+        assert has_grad, f"Backbone {i} has no gradients"
+
+    # Test get_optim_params with separate encoders
+    policy_separate = ACTPolicy(config_separate)
+    optim_params = policy_separate.get_optim_params()
+    assert len(optim_params) == 2
+    # With 3 cameras, backbone param count should be 3x (20 * 3 = 60)
+    assert len(optim_params[1]["params"]) == 60
+
+
 @pytest.mark.parametrize("policy_name", available_policies)
 def test_policy_defaults(dummy_dataset_metadata, policy_name: str):
     """Check that the policy can be instantiated with defaults."""

@@ -68,6 +68,9 @@ class ACTConfig(PreTrainedConfig):
             `None` means no pretrained weights.
         replace_final_stride_with_dilation: Whether to replace the ResNet's final 2x2 stride with a dilated
             convolution.
+        use_separate_encoder_per_camera: Whether to use a separate ResNet backbone for each camera instead
+            of sharing a single backbone across all cameras. When True, creates one backbone per camera,
+            which increases model capacity but also increases memory usage proportionally.
         pre_norm: Whether to use "pre-norm" in the transformer blocks.
         dim_model: The transformer blocks' main hidden dimension.
         n_heads: The number of heads to use in the transformer blocks' multi-head attention.
@@ -108,6 +111,7 @@ class ACTConfig(PreTrainedConfig):
     vision_backbone: str = "resnet18"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     replace_final_stride_with_dilation: int = False
+    use_separate_encoder_per_camera: bool = False
     # Transformer layers.
     pre_norm: bool = False
     dim_model: int = 512

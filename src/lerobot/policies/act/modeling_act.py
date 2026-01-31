@@ -321,15 +321,33 @@ class ACT(nn.Module):
 
         # Backbone for image feature extraction.
         if self.config.image_features:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            num_cameras = len(self.config.image_features)
+
+            if config.use_separate_encoder_per_camera:
+                # Create separate backbone for each camera
+                self.backbones = nn.ModuleList()
+                for _ in range(num_cameras):
+                    backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                        replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                        weights=config.pretrained_backbone_weights,
+                        norm_layer=FrozenBatchNorm2d,
+                    )
+                    self.backbones.append(
+                        IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+                    )
+                # Store backbone_model for later use (input projection layer creation)
+                self._backbone_feat_dim = backbone_model.fc.in_features
+            else:
+                backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                    replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                    weights=config.pretrained_backbone_weights,
+                    norm_layer=FrozenBatchNorm2d,
+                )
+                # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
+                # feature map).
+                # Note: The forward method of this returns a dict: {"feature_map": output}.
+                self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+                self._backbone_feat_dim = backbone_model.fc.in_features
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -347,9 +365,17 @@ class ACT(nn.Module):
             )
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         if self.config.image_features:
-            self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
-            )
+            if config.use_separate_encoder_per_camera:
+                # Create separate input projection for each camera
+                self.encoder_img_feat_input_projs = nn.ModuleList()
+                for _ in range(num_cameras):
+                    self.encoder_img_feat_input_projs.append(
+                        nn.Conv2d(self._backbone_feat_dim, config.dim_model, kernel_size=1)
+                    )
+            else:
+                self.encoder_img_feat_input_proj = nn.Conv2d(
+                    self._backbone_feat_dim, config.dim_model, kernel_size=1
+                )
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
         if self.config.robot_state_feature:
@@ -469,19 +495,36 @@ class ACT(nn.Module):
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
-            for img in batch[OBS_IMAGES]:
-                cam_features = self.backbone(img)["feature_map"]
-                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
-                cam_features = self.encoder_img_feat_input_proj(cam_features)
+            if self.config.use_separate_encoder_per_camera:
+                # Use separate backbone and projection for each camera
+                for cam_idx, img in enumerate(batch[OBS_IMAGES]):
+                    cam_features = self.backbones[cam_idx](img)["feature_map"]
+                    cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+                    cam_features = self.encoder_img_feat_input_projs[cam_idx](cam_features)
 
-                # Rearrange features to (sequence, batch, dim).
-                cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
-                cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
+                    # Rearrange features to (sequence, batch, dim).
+                    cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
+                    cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
 
-                # Extend immediately instead of accumulating and concatenating
-                # Convert to list to extend properly
-                encoder_in_tokens.extend(list(cam_features))
-                encoder_in_pos_embed.extend(list(cam_pos_embed))
+                    # Extend immediately instead of accumulating and concatenating
+                    # Convert to list to extend properly
+                    encoder_in_tokens.extend(list(cam_features))
+                    encoder_in_pos_embed.extend(list(cam_pos_embed))
+            else:
+                # Use shared backbone for all cameras
+                for img in batch[OBS_IMAGES]:
+                    cam_features = self.backbone(img)["feature_map"]
+                    cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+                    cam_features = self.encoder_img_feat_input_proj(cam_features)
+
+                    # Rearrange features to (sequence, batch, dim).
+                    cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
+                    cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
+
+                    # Extend immediately instead of accumulating and concatenating
+                    # Convert to list to extend properly
+                    encoder_in_tokens.extend(list(cam_features))
+                    encoder_in_pos_embed.extend(list(cam_pos_embed))
 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
