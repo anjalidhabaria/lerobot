@@ -22,6 +22,7 @@ from typing import Any
 
 import torch
 from accelerate import Accelerator
+from huggingface_hub import HfApi
 from termcolor import colored
 from torch.optim import Optimizer
 
@@ -455,6 +456,23 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
+
+                # Upload checkpoint to HuggingFace Hub
+                if cfg.policy.repo_id:
+                    try:
+                        api = HfApi()
+                        api.create_repo(repo_id=cfg.policy.repo_id, exist_ok=True, repo_type="model")
+                        step_id = get_step_identifier(step, cfg.steps)
+                        api.upload_folder(
+                            repo_id=cfg.policy.repo_id,
+                            repo_type="model",
+                            folder_path=str(checkpoint_dir),
+                            path_in_repo=step_id,
+                            commit_message=f"Checkpoint {step}",
+                        )
+                        logging.info(f"Uploaded checkpoint to https://huggingface.co/{cfg.policy.repo_id}/tree/main/{step_id}")
+                    except Exception as e:
+                        logging.warning(f"Failed to upload checkpoint to hub: {e}")
 
             accelerator.wait_for_everyone()
 
