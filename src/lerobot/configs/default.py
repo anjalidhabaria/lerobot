@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 from dataclasses import dataclass, field
 
 from lerobot.datasets.transforms import ImageTransformsConfig
@@ -35,6 +36,16 @@ class DatasetConfig:
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     streaming: bool = False
+
+    def __post_init__(self) -> None:
+        # Handle CLI passing list as string literal (e.g. '["repo1", "repo2"]')
+        if isinstance(self.repo_id, str) and self.repo_id.startswith("["):
+            try:
+                parsed = ast.literal_eval(self.repo_id)
+                if isinstance(parsed, list):
+                    self.repo_id = parsed
+            except (ValueError, SyntaxError):
+                pass  # Keep as string if parsing fails
 
 
 @dataclass
