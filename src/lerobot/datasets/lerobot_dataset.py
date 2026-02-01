@@ -1687,6 +1687,26 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         # with multiple robots of different ranges. Instead we should have one normalization
         # per robot.
         self.stats = aggregate_stats([dataset.meta.stats for dataset in self._datasets])
+        
+        # Create a meta-like object for compatibility with code expecting LeRobotDatasetMetadata
+        self._meta = self._create_meta()
+
+    def _create_meta(self):
+        """Create a simple object that mimics LeRobotDatasetMetadata interface."""
+        from types import SimpleNamespace
+        meta = SimpleNamespace()
+        meta.features = self._datasets[0].meta.features  # Use first dataset's features
+        meta.stats = self.stats
+        meta.fps = self.fps
+        meta.camera_keys = self.camera_keys
+        meta.video_keys = [k for k in meta.features if meta.features[k].get("dtype") == "video"]
+        meta.repo_id = self.repo_ids  # List of repo_ids
+        return meta
+
+    @property
+    def meta(self):
+        """Return a meta-like object for compatibility with LeRobotDataset interface."""
+        return self._meta
 
     @property
     def repo_id_to_index(self):
